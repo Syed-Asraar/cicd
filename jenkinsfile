@@ -1,0 +1,69 @@
+pipeline {
+    agent any
+
+    tools {
+        // Use the NodeJS tool configured in Jenkins to run npm
+        nodejs 'NodeJS-18'
+    }
+
+    environment {
+        // We only need the alias for the UAT org now
+        SF_UAT_ALIAS = 'uat-org'
+    }
+
+    stages {
+        stage('Install Salesforce CLI') {
+            steps {
+                echo 'Installing Salesforce CLI...'
+                // Install the latest sf cli using npm
+                sh 'npm install @salesforce/cli --global'
+                sh 'sf --version'
+            }
+        }
+
+        stage('Authenticate to UAT Org') {
+            steps {
+                // Securely load the secret auth URL for the UAT org
+                withCredentials([string(credentialsId: 'sf-uat-auth-url', variable: 'SF_UAT_AUTH_URL')]) {
+                    sh "echo ${SF_UAT_AUTH_URL} > uat-auth-url.txt"
+                    sh "sf org login sfdx-url -f uat-auth-url.txt --set-default --alias ${SF_UAT_ALIAS}"
+                }
+            }
+        }
+
+        stage('Validate against UAT (Feature Branch)') {
+            // This stage runs on all branches EXCEPT main to check code validity
+            when {
+                not { branch 'main' }
+            }
+            steps {
+                echo "Validating code against ${SF_UAT_ALIAS}..."
+                // Validate deployment without saving to the org (check-only)
+                sh "sf project deploy validate -d force-app --test-level RunLocalTests -o ${SF_UAT_ALIAS}"
+            }
+        }
+
+        stage('Deploy to UAT (Main Branch)') {
+            // This stage runs ONLY when code is merged to the 'main' branch
+            when {
+                branch 'main'
+            }
+            steps {
+                echo "Deploying to ${SF_UAT_ALIAS}..."
+                // Perform the actual deployment
+                sh "sf project deploy start -d force-app --test-level RunLocalTests -o ${SF_UAT_ALIAS}"
+            }
+        }
+    }
+
+    post {
+        // This block runs after every build, regardless of status
+        always {
+            echo 'Logging out from authenticated org...'
+            // Clean up and log out from the org
+            sh "sf org logout --target-org ${SF_UAT_ALIAS} --no-prompt"
+            // Clean up the temp auth file
+            sh 'rm -f uat-auth-url.txt'
+        }
+    }
+}
